@@ -77,61 +77,49 @@ def plot_metrics(train_losses, test_losses, train_accuracies, test_accuracies, t
     plt.savefig('3test_tp_tn_fp_fn_curve.png', bbox_inches='tight', dpi=300)
 
 
-def fingerspelling(video_names, predictions):
-    unique_video = np.unique(video_names)
-    all_fingerspelling_values = []
 
+def fingerspelling(video_names, predictions):
+    # Convert predictions to a NumPy array for easier handling
+    predictions = np.array(predictions)
+    all_fingerspelling_values = np.zeros_like(predictions)  # Initialize with zeros, same length as predictions
+    
+    unique_video = np.unique(video_names)
 
     for video in unique_video:
         # Get video path and capture object
-        video=str(int(video))
+        video = str(int(video))  # Ensure video name is an integer in string format
         video_path = f'/scratch/local/hdd/alyssa/bobsl/bobsl/v1.4/original_data/videos/mp4/{video}.mp4'
-        # print(video_path)
         video=int(video)
-
-
-        # if os.path.exists(video_path):
-        #     print(True)
-        # else:
-        #     print(False)
         cap = cv2.VideoCapture(video_path)
         frame_rate = cap.get(cv2.CAP_PROP_FPS)
 
+        # Indices of the frames belonging to the current video
         video_indices = np.atleast_1d(np.where(video_names == video)[0])
-        # print(video_indices)
         video_predictions = predictions[video_indices]
-        # print(video_predictions)
 
         # Number of frames corresponds to the length of video_indices
         num_frames = len(video_indices)
 
-        # Sliding window parameters
-        window_size = int(frame_rate)  # 1-second window
-        step_size = 1
+        # Sliding window parameters (window_size is 1 second, step_size is 1 frame)
+        window_size = int(frame_rate)  # 1-second window (assuming frame rate is frames per second)
+        step_size = 1  # Moving by 1 frame at a time
 
-        # Initialize fingerspelling values
-        fingerspelling_values = np.zeros(num_frames)
-
-        # Apply sliding window logic
-        for start in range(0, num_frames - window_size + 1, step_size):
+        # Apply sliding window logic, frame-by-frame
+        for start in range(num_frames):
             end = start + window_size
+
+            # Get the window's predictions
             window_predictions = video_predictions[start:end]
 
-            # Check if the proportion of predicted frames > 0.5 in the window exceeds the threshold
+            # Calculate the proportion of active frames in the window
             proportion_active = np.sum(window_predictions > 0.5) / window_size
-            fingerspelling = 1 if proportion_active > 0.3 else 0
+            fingerspelling = 1 if proportion_active > 0.5 else 0
 
-            if fingerspelling == 1:
-                fingerspelling_values[start:end] = 1
+            # Assign the fingerspelling value for the current frame
+            all_fingerspelling_values[video_indices[start]] = fingerspelling
 
-        # Store the results in the same order
-        # print(fingerspelling_values)
-        all_fingerspelling_values.extend(fingerspelling_values)
-
-
-    # Convert to float
+    # Return as a torch tensor
     return torch.FloatTensor(all_fingerspelling_values)
-
 
 def oversample_random(X, y):
     """Random oversampling of the minority class."""
@@ -221,15 +209,19 @@ def train_and_evaluate(model, X_train, y_train, X_test, y_test, video_list, lear
             test_FP.append(FP_test)
             test_TN.append(TN_test)
             # print('results')
-            print(results)
+            # print(results)
             # test_accuracy = (results == y_test).float().mean().item()
             # test_accuracies.append(test_accuracy)
             test_f1_scores.append(calculate_f1_score(TP_test, FP_test, FN_test))
-            class0=TN_test / (y_test == 0).sum().item() if (TN_test + FP_test) > 0 else 0.0
+            class0= TN_test /((y_test == 0).sum().item() )
+            # print(TN_test)
+            # print(TP_test)
             test_class_0_accuracies.append(class0)
-            class1=TP_test / (y_test == 1).sum().item() if (TP_test + FN_test) > 0 else 0.0
+            class1= TP_test / (y_test == 1).sum().item()
             test_class_1_accuracies.append(class1)
             test_accuracy = (class1+class0)/2
+            # print(class0)
+            # print(class1)
             test_accuracies.append(test_accuracy)
         if epoch % 100 == 0:
             print(f"Epoch {epoch}/{num_epochs}, Train Loss: {total_loss:.4f}, Test Loss: {test_loss:.4f}, Train Acc: {train_accuracy:.4f}, Test Acc: {test_accuracy:.4f}")
