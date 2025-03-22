@@ -1,0 +1,215 @@
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import h5py
+import copy
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+import joblib
+import cv2
+from torch.utils.data import Dataset, DataLoader, TensorDataset
+from imblearn.over_sampling import RandomOverSampler
+import os
+import time
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Update Dataset class to work with DataLoader
+class BOBSLDataset(Dataset):
+    def __init__(self, file_path, transform=None):
+        with h5py.File(file_path, 'r') as f:
+            self.feature = f['video/features'][:]
+            self.label = f['video/label'][:]
+            self.video_list = f['video/video_name'][:]
+
+    def __len__(self):
+        return len(self.feature)
+
+    def __getitem__(self, idx):
+        feature = self.feature[idx]
+        label = self.label[idx]
+        return torch.tensor(feature, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
+
+# class BinaryClassifier(nn.Module):
+#     def __init__(self, input_size, hidden_size=64):
+#         super(BinaryClassifier, self).__init__()
+        
+#         # First hidden layer (input to hidden)
+#         self.fc1 = nn.Linear(input_size, hidden_size)
+#         #self.bn1 = nn.BatchNorm1d(hidden_size)
+#         self.relu1 = nn.ReLU()
+        
+#         # Output layer (hidden to output)
+#         self.fc2 = nn.Linear(hidden_size, 1)  # Output layer (binary classification)
+
+#     def forward(self, x):
+#         # Pass through the first layer
+#         x = self.fc1(x)
+#         #x = self.bn1(x)
+#         x = self.relu1(x)
+
+#         # Output layer with no activation (we'll use Sigmoid outside the model)
+#         x = self.fc2(x)
+#         return x
+
+class BinaryClassifier(nn.Module):
+    def __init__(self, input_size, hidden_size=128, dropout_prob=0.2):
+        super(BinaryClassifier, self).__init__()
+        
+        # First hidden layer
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.layer_norm1 = nn.LayerNorm(hidden_size)  
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout_prob)
+        
+        # Second hidden layer (newly added)
+        self.fc2 = nn.Linear(hidden_size, hidden_size // 2)
+        self.layer_norm2 = nn.LayerNorm(hidden_size // 2)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout_prob)
+
+        # Third hidden layer (newly added)
+        self.fc3 = nn.Linear(hidden_size // 2, hidden_size // 4)
+        self.layer_norm3 = nn.LayerNorm(hidden_size // 4)
+        self.relu3 = nn.ReLU()
+        self.dropout3 = nn.Dropout(dropout_prob)
+        
+        # Output layer
+        self.fc4 = nn.Linear(hidden_size // 4, 1)  
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.layer_norm1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+
+        x = self.fc2(x)
+        x = self.layer_norm2(x)
+        x = self.relu2(x)
+        x = self.dropout2(x)
+
+        x = self.fc3(x)
+        x = self.layer_norm3(x)
+        x = self.relu3(x)
+        x = self.dropout3(x)
+
+        x = self.fc4(x)  # Output layer (no activation inside the model)
+        return x
+
+def train_and_evaluate(model, train_loader, test_loader, optimizer, criterion, num_epochs=10):
+    best_accuracy = 0.0
+    best_model = None
+
+    for epoch in range(num_epochs):
+        model.train()  
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+
+        for features, labels in train_loader:
+            features, labels = features.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+
+            outputs = model(features)
+            loss = criterion(outputs, labels.unsqueeze(1))
+            loss.backward()
+            optimizer.step()
+
+            train_loss += loss.item()
+
+            predictions = (torch.sigmoid(outputs) > 0.5).float()
+            train_correct += (predictions == labels.unsqueeze(1)).sum().item()
+            train_total += labels.size(0)
+
+        train_accuracy = train_correct / train_total
+        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {train_loss/len(train_loader):.4f}, Accuracy: {train_accuracy:.4f}")
+
+        model.eval()  
+        test_loss = 0.0
+        test_correct = 0
+        test_total = 0
+        correct_class_0 = 0
+        correct_class_1 = 0
+        total_class_0 = 0
+        total_class_1 = 0
+
+        with torch.no_grad():  
+            for features, labels in test_loader:
+                features, labels = features.to(device), labels.to(device)
+
+                outputs = model(features)
+                loss = criterion(outputs, labels)
+                test_loss += loss.item()
+
+                predictions = (torch.sigmoid(outputs) > 0.5).float()
+                test_correct += (predictions == labels).sum().item()
+                test_total += labels.size(0)
+
+                correct_class_0 += ((predictions == 0) & (labels == 0)).sum().item()
+                correct_class_1 += ((predictions == 1) & (labels == 1)).sum().item()
+                total_class_0 += (labels == 0).sum().item()
+                total_class_1 += (labels == 1).sum().item()
+
+
+        class_0_accuracy = correct_class_0 / total_class_0 if total_class_0 > 0 else 0.0
+        class_1_accuracy = correct_class_1 / total_class_1 if total_class_1 > 0 else 0.0
+        test_accuracy = class_0_accuracy * 0.5 + class_1_accuracy * 0.5
+        print(f"Test Loss: {test_loss/len(test_loader):.4f}, Test Accuracy: {test_accuracy:.4f}")
+        #print(f"Class 0 Accuracy: {class_0_accuracy:.4f}, Class 1 Accuracy: {class_1_accuracy:.4f}")
+
+        if test_accuracy > best_accuracy:
+            best_accuracy = test_accuracy
+            best_model = copy.deepcopy(model)
+
+    return best_model
+
+
+
+def main():
+    train_file = "training1f86.h5"
+    test_file = "testing1f86.h5"
+
+    train_dataset = BOBSLDataset(train_file)
+    test_dataset = BOBSLDataset(test_file)
+
+    scaler = StandardScaler()
+
+    X_train = np.array([train_dataset[i][0].numpy() for i in range(len(train_dataset))])
+    y_train = np.array([train_dataset[i][1].numpy() for i in range(len(train_dataset))])
+
+    ros = RandomOverSampler(sampling_strategy='auto')
+    X_train_oversample, y_train_oversample = ros.fit_resample(X_train, y_train)
+
+    scaler.fit(X_train_oversample)
+    joblib.dump(scaler, 'scaler.pkl')
+
+    X_train_oversample = scaler.transform(X_train_oversample)
+    X_test = scaler.transform(np.array([test_dataset[i][0].numpy() for i in range(len(test_dataset))]))
+
+    train_features = torch.tensor(X_train_oversample, dtype=torch.float32)
+    train_labels = torch.tensor(y_train_oversample, dtype=torch.float32)
+    test_features = torch.tensor(X_test, dtype=torch.float32)
+    test_labels = torch.tensor(np.array([test_dataset[i][1].numpy() for i in range(len(test_dataset))]), dtype=torch.float32)
+
+    train_data = TensorDataset(train_features, train_labels)
+    test_data = TensorDataset(test_features, test_labels)
+
+    train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
+    test_loader = DataLoader(test_data, batch_size=64, shuffle=False)
+
+    # Model, criterion, and optimizer
+    model = BinaryClassifier(input_size=X_train_oversample.shape[1]).to(device)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # Train and evaluate the model
+    best_model = train_and_evaluate(model, train_loader, test_loader, optimizer, criterion, num_epochs=8)
+
+    # Save the best model
+    torch.save(best_model.state_dict(), 'best_binary_classifier.pth')
+
+
+if __name__ == '__main__':
+    main()
